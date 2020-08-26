@@ -11,6 +11,7 @@ import System.Directory.Tree
 import System.Directory
 import System.Environment
 import System.Exit
+import System.FilePath
 
 import Control.Applicative
 import Control.Monad
@@ -30,6 +31,7 @@ import Options.Declarative
 data Layer = 
   Layer
     { layerFilePath :: FilePath
+    , active :: Bool
     }
   deriving (Eq, Read, Show)
 
@@ -90,9 +92,19 @@ putScreen = mapM_ putTop
   where
     putTop Top{..} = putString $ "[" ++ topLayer ++ "] " ++ topTarget
 
-copyFile' :: FilePath -> FilePath -> CmdMonad ()
-copyFile' src dst = do
-    createDirectoryIfMissing
+copyFileC :: FilePath -> FilePath -> CmdMonad ()
+copyFileC src dst = liftIO $ do
+    let (dstDir, dstFile) = splitFileName dst
+    createDirectoryIfMissing True dstDir
+    copyFile src dst
+
+checkFile :: FilePath -> CmdMonad Bool
+checkFile = liftIO . doesFileExist  
+
+checkFile' :: FilePath -> CmdMonad ()
+checkFile' fp = do
+  c <- checkFile fp
+  putString $ "    -- check " ++ fp ++ ": " ++ show c
 
 -- Screen
 -- ----------------------------------------------------------------------------
@@ -175,7 +187,7 @@ addLayerCmd (get -> oId') (get -> layerPath) = runCmdMonad $ do
     [absoluteLayerPath] <- makeAbsolutes [layerPath]
     checkAddLayerParams config oId' absoluteLayerPath
     checkAddLayerPath absoluteLayerPath
-    let config' = Config { overrideFSs = fmap ( \ o@OverrideFS{..} -> if oId == oId' then o{layers = layers ++ [Layer absoluteLayerPath]} else o ) (overrideFSs config) }
+    let config' = Config { overrideFSs = fmap ( \ o@OverrideFS{..} -> if oId == oId' then o{layers = layers ++ [Layer absoluteLayerPath True]} else o ) (overrideFSs config) }
     writeConfig config'
 
 checkAddLayerParams :: Config -> FilePath -> FilePath -> CmdMonad ()
@@ -204,7 +216,7 @@ putOverrideFs OverrideFS{..} = do
     putString $ "    destination: " ++ destination
     putString $ "    backup:      " ++ backup
     putString $ "    layers:"
-    forM_ layers $ \ Layer{..} -> putString $ "      " ++ layerFilePath
+    forM_ (zip [1..] layers) $ \ (i, Layer{..}) -> putString $ "      " ++ show i ++ ". [" ++ (if active then "X" else " ") ++ "]" ++ layerFilePath
 
 -- COMMAND: show-overridefs
 -- ----------------------------------------------------------------------------
@@ -260,7 +272,8 @@ checkRemoveOverrideFsParam Config{..} oId' = do
 
 overrideCmd :: Arg "OID" String
             -> Cmd "Override an Override FS with Layers" ()
-overrideCmd (get -> oId') = do
+overrideCmd (get -> oId') = runCmdMonad $ do
+    config <- readConfig
     checkOverrideParam config oId'
     let overridefs = fromJust $ find ((oId'==) . oId) (overrideFSs config)
     screen <- getScreen overridefs
@@ -269,21 +282,76 @@ overrideCmd (get -> oId') = do
         putString $ "  " ++ if topLayer == [] then "original" else "from " ++ topLayer
         when (topLayer /= "") $ do
             let backupFilePath = (backup overridefs) ++ (tail topTarget)
-           checkBackup <- checkFile backupFilePath
-           when (not checkBackup) $ do
-               putString $ "  no backup"
-               
-
-
-
-checkFile :: FilePath -> CmdMonad Bool
-checkFile = liftIO . doesFileExist
-    
+                destinationFilePath = (destination overridefs) ++ (tail topTarget)
+                layerPath = topLayer ++ (tail topTarget)
+            checkBackup <- checkFile backupFilePath
+            checkDestination <- checkFile destinationFilePath
+            putString $ "  destination file: " ++ destinationFilePath
+            putString $ "  backup file:      " ++ backupFilePath
+            putString $ "  layer file:       " ++ layerPath
+            putString $ "  check backup: " ++ show checkBackup ++ ", check destination: " ++ show checkDestination
+            if destinationFilePath == "C:\\Users\\voidp\\haskell\\orig\\3.txt" then putString "    same" else return ()
+            when (not checkBackup && checkDestination) $ do
+                putString $ "  no backup"
+                putString $ "  copy backup " ++ destinationFilePath
+                putString $ "           to " ++ backupFilePath
+                copyFileC destinationFilePath backupFilePath
+            putString $ "  copy layer " ++ layerPath
+            putString $ "          to " ++ destinationFilePath
+            copyFileC layerPath destinationFilePath
 
 checkOverrideParam :: Config -> FilePath -> CmdMonad ()
 checkOverrideParam Config{..} oId' = do
     when (not $ elem oId' (map oId overrideFSs)) $ throwE ("OverrideFS id : " ++ oId' ++ " is not exists")
 
+-- COMMAND: reset
+-- ----------------------------------------------------------------------------
+
+resetCmd :: Arg "OID" String
+         -> Cmd "Reset an Override FS" ()
+resetCmd (get -> oId') = runCmdMonad $ do
+    config <- readConfig
+    checkResetParam config oId'
+    let overridefs = fromJust $ find ((oId'==) . oId) (overrideFSs config)
+    screen <- getScreen overridefs
+    forM_ screen $ \ Top{..} -> do
+        putString $ "item: " ++ topTarget
+        putString $ "  " ++ if topLayer == [] then "original" else "from " ++ topLayer
+        when (topLayer /= "") $ do
+            let backupFilePath = (backup overridefs) ++ (tail topTarget)
+                destinationFilePath = (destination overridefs) ++ (tail topTarget)
+                layerPath = topLayer ++ (tail topTarget)
+            checkBackup <- checkFile backupFilePath
+            if checkBackup
+                then do
+                    putString $ "  copy backup " ++ backupFilePath
+                    putString $ "           to " ++ destinationFilePath
+                    copyFileC layerPath destinationFilePath
+                    liftIO $ removeFile backupFilePath
+                else do
+                    liftIO $ removeFile destinationFilePath
+            
+checkResetParam :: Config -> FilePath -> CmdMonad ()
+checkResetParam Config{..} oId' = do
+    when (not $ elem oId' (map oId overrideFSs)) $ throwE ("OverrideFS id : " ++ oId' ++ " is not exists")
+
+-- COMMAND: reorder-layers
+-- ----------------------------------------------------------------------------
+
+reorderLayersCmd :: Arg "OID" String
+                 -> Cmd "Reorder and set activity of Layers (a-active/n-not-active)" ()
+reorderLayersCmd (get -> oId') = runCmdMonad $ do
+    config <- readConfig
+    checkReorderLayersParam config oId'
+    let overridefs = fromJust $ find ((oId'==) . oId) (overrideFSs config)
+    screen <- getScreen overridefs
+    putOverrideFs overridefs
+    putString "Current order:"
+    putString $ "  " ++ concat (map (\(i,Layer{..}) -> show i ++ (if active then "a" else "n") ++ " ") (zip [1..] (layers overridefs)))
+
+checkReorderLayersParam :: Config -> FilePath -> CmdMonad ()
+checkReorderLayersParam Config{..} oId' = do
+    when (not $ elem oId' (map oId overrideFSs)) $ throwE ("OverrideFS id : " ++ oId' ++ " is not exists")
 
 -- MAIN
 -- ----------------------------------------------------------------------------
@@ -296,6 +364,9 @@ main = run_ $
     , subCmd "show-all" showAllCmd
     , subCmd "show-overridefs" showOverrideFsCmd
     , subCmd "remove-overridefs" removeOverrideFsCmd
+    , subCmd "override" overrideCmd
+    , subCmd "reset" resetCmd
+    , subCmd "reorder-layers" reorderLayersCmd
     ]
 
 
