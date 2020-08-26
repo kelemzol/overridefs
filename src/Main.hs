@@ -71,7 +71,10 @@ putString :: String -> CmdMonad ()
 putString = liftIO . putStrLn
 
 makeAbsolutes :: [FilePath] -> CmdMonad [FilePath]
-makeAbsolutes = liftIO . mapM makeAbsolute
+makeAbsolutes = liftIO . mapM makeAbsolute . map cutEnd
+  where
+    cutEnd :: FilePath -> FilePath
+    cutEnd fp = let l = last fp in if l == '\\' || l == '/' then init fp else fp
 
 getFiles :: FilePath -> CmdMonad [FilePath]
 getFiles fp = do
@@ -86,6 +89,10 @@ putScreen :: Screen -> CmdMonad ()
 putScreen = mapM_ putTop
   where
     putTop Top{..} = putString $ "[" ++ topLayer ++ "] " ++ topTarget
+
+copyFile' :: FilePath -> FilePath -> CmdMonad ()
+copyFile' src dst = do
+    createDirectoryIfMissing
 
 -- Screen
 -- ----------------------------------------------------------------------------
@@ -104,7 +111,7 @@ data Top
 
 mergeLayer :: Screen -> FilePath -> [FilePath] -> Screen
 mergeLayer sc l [] = sc
-mergeLayer sc l (fp:fps) = merge sc l fp
+mergeLayer sc l (fp:fps) = mergeLayer (merge sc l fp) l fps
   where
     merge [] l fp = [Top l fp]
     merge (t:sc) l fp = if topTarget t == fp then (Top l fp):sc else t:(merge sc l fp)
@@ -112,6 +119,22 @@ mergeLayer sc l (fp:fps) = merge sc l fp
 mergeLayers :: Screen -> [(FilePath, [FilePath])] -> Screen
 mergeLayers sc [] = sc
 mergeLayers sc ((l,fps):ls) = mergeLayers (mergeLayer sc l fps) ls
+
+getScreen :: OverrideFS -> CmdMonad Screen
+getScreen overridefs = do
+    originalFiles <- ("",) <$> (getFiles (destination overridefs))
+    layers' <- forM (map layerFilePath $ layers $ overridefs) getFiles'
+    let layersWithOriginalFiles = originalFiles:layers'
+        screen = mergeLayers emptyScreen layersWithOriginalFiles
+    return screen
+
+
+e111 = "l1"
+e112 = ["1","2"]
+e121 = "l2"
+e122 = ["1","3"]
+
+e1 = mergeLayers [] [(e111,e112),(e121,e122)]
 
 -- COMMAND: new
 -- ----------------------------------------------------------------------------
@@ -196,16 +219,17 @@ showOverrideFsCmd (get -> oId') (get -> showLayeredFiles) (get -> showAllFiles) 
     let overridefs = fromJust $ find ((oId'==) . oId) (overrideFSs config)
     putOverrideFs overridefs
     when (showLayeredFiles && (not showAllFiles)) $ do
+        putString "Layered files:"
         layers' <- forM (map layerFilePath $ layers $ overridefs) getFiles'
         let screen = mergeLayers emptyScreen layers'
         putScreen screen
-        return ()
     when showAllFiles $ do
-        (a :/ dtree) <- liftIO $ build (destination overridefs)
-        putString $ "anchor: " ++ a
-        let cutPrefix = ("@"++) . (drop (length (destination overridefs)))
-        traverse (putString . cutPrefix) dtree
-        return ()
+        putString "All files:"
+        originalFiles <- ("",) <$> (getFiles (destination overridefs))
+        layers' <- forM (map layerFilePath $ layers $ overridefs) getFiles'
+        let layersWithOriginalFiles = originalFiles:layers'
+            screen = mergeLayers emptyScreen layersWithOriginalFiles
+        putScreen screen
 
 checkShowOverrideFsParam :: Config -> FilePath -> CmdMonad ()
 checkShowOverrideFsParam Config{..} oId' = do
@@ -230,6 +254,36 @@ removeOverrideFsCmd (get -> oId') (get -> inconsistent) = runCmdMonad $ do
 checkRemoveOverrideFsParam :: Config -> FilePath -> CmdMonad ()
 checkRemoveOverrideFsParam Config{..} oId' = do
     when (not $ elem oId' (map oId overrideFSs)) $ throwE ("OverrideFS id : " ++ oId' ++ " is not exists")
+
+-- COMMAND: override
+-- ----------------------------------------------------------------------------
+
+overrideCmd :: Arg "OID" String
+            -> Cmd "Override an Override FS with Layers" ()
+overrideCmd (get -> oId') = do
+    checkOverrideParam config oId'
+    let overridefs = fromJust $ find ((oId'==) . oId) (overrideFSs config)
+    screen <- getScreen overridefs
+    forM_ screen $ \ Top{..} -> do
+        putString $ "item: " ++ topTarget
+        putString $ "  " ++ if topLayer == [] then "original" else "from " ++ topLayer
+        when (topLayer /= "") $ do
+            let backupFilePath = (backup overridefs) ++ (tail topTarget)
+           checkBackup <- checkFile backupFilePath
+           when (not checkBackup) $ do
+               putString $ "  no backup"
+               
+
+
+
+checkFile :: FilePath -> CmdMonad Bool
+checkFile = liftIO . doesFileExist
+    
+
+checkOverrideParam :: Config -> FilePath -> CmdMonad ()
+checkOverrideParam Config{..} oId' = do
+    when (not $ elem oId' (map oId overrideFSs)) $ throwE ("OverrideFS id : " ++ oId' ++ " is not exists")
+
 
 -- MAIN
 -- ----------------------------------------------------------------------------
